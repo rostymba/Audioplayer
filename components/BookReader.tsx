@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { StoredBook } from "@/lib/types";
 
@@ -17,7 +17,7 @@ type RenditionLike = {
   };
 };
 
-export function BookReader({ book, onProgress }: { book: StoredBook; onProgress: (cfi: string, percent: number) => void }) {
+export function BookReader({ book, onProgress, onExit }: { book: StoredBook; onProgress: (cfi: string, percent: number) => void; onExit: () => void }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const renditionRef = useRef<RenditionLike | null>(null);
   const initialProgressRef = useRef(book.progress);
@@ -81,10 +81,13 @@ export function BookReader({ book, onProgress }: { book: StoredBook; onProgress:
   return (
     <section className="reader-surface" aria-label={`Книга ${book.title}`}>
       <header className="reader-toolbar">
-        <div className="reader-title-block">
-          <span className="eyebrow">Сейчас читается</span>
-          <strong>{book.title}</strong>
-          <span>{book.author}</span>
+        <div className="reader-heading">
+          <button className="icon-button" onClick={onExit} aria-label="Вернуться в библиотеку"><ArrowLeft size={16} /></button>
+          <div className="reader-title-block">
+            <span className="eyebrow">Сейчас читается</span>
+            <strong>{book.title}</strong>
+            <span>{book.author}</span>
+          </div>
         </div>
         <div className="reader-tools" aria-label="Настройки чтения">
           <button className="icon-button" onClick={() => changeFont(-10)} aria-label="Уменьшить текст"><Minus size={16} /></button>

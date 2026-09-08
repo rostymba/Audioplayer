@@ -1,12 +1,10 @@
 "use client";
 
 import {
-  ArrowLeft,
   BookOpen,
   FileUp,
   Library,
   LoaderCircle,
-  Radio,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -116,21 +114,9 @@ export function AudioplayerApp() {
   if (selectedBook) {
     return (
       <main className="app-shell reader-mode" style={{ "--mood-a": selectedBook.atmosphere.colors[0], "--mood-b": selectedBook.atmosphere.colors[1] } as React.CSSProperties}>
-        <header className="app-header">
-          <button className="brand-button" onClick={() => setSelectedBook(null)} aria-label="Вернуться в библиотеку">
-            <span className="brand-mark"><Radio size={17} /></span>
-            <span><strong>Audioplayer</strong><small>live reading desk</small></span>
-          </button>
-          <div className="header-book-path">
-            <button className="text-button" onClick={() => setSelectedBook(null)}><ArrowLeft size={14} />Библиотека</button>
-            <span>/</span>
-            <strong>{selectedBook.title}</strong>
-          </div>
-          <div className="on-air"><span />on air</div>
-        </header>
         <div className={`reading-workspace ${historyCollapsed ? "history-collapsed" : ""}`}>
           <RadioPanel atmosphere={selectedBook.atmosphere} collapsed={historyCollapsed} onToggle={toggleHistory} />
-          <BookReader key={selectedBook.id} book={selectedBook} onProgress={saveProgress} />
+          <BookReader key={selectedBook.id} book={selectedBook} onProgress={saveProgress} onExit={() => setSelectedBook(null)} />
         </div>
       </main>
     );
@@ -140,13 +126,6 @@ export function AudioplayerApp() {
     <main className="app-shell library-mode">
       <div className="ambient-field ambient-field-a" />
       <div className="ambient-field ambient-field-b" />
-      <header className="app-header library-header">
-        <div className="brand-button static">
-          <span className="brand-mark"><Radio size={17} /></span>
-          <span><strong>Audioplayer</strong><small>live reading desk</small></span>
-        </div>
-        <span className="edition-label">Personal demo / 001</span>
-      </header>
 
       <section className="library-content">
         <div className="library-intro">
