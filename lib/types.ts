@@ -39,8 +39,11 @@ export type RadioStation = {
 };
 
 export type HistoryEntry = {
+  stationId?: string;
+  country?: string;
+  streamUrl?: string;
   id: string;
-  type: "station" | "transition" | "system" | "rejected";
+  type: "station" | "transition" | "system" | "rejected" | "track";
   stationName: string;
   streamTitle?: string;
   timestamp: number;

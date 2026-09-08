@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AtmosphereProfile, HistoryEntry, RadioStation } from "@/lib/types";
+import { diversify, nextStation } from '@/lib/radio-selection';
 
 type PlayerState = "searching" | "ready" | "playing" | "paused" | "transitioning" | "error";
 
@@ -54,8 +55,14 @@ export function RadioPanel({
   const activeDeck = useRef<"a" | "b">("a");
   const animationFrame = useRef<number | null>(null);
   const volumeRef = useRef(TARGET_VOLUME);
+  const switching = useRef(false);
+  const visited = useRef(new Set<string>());
+  const lastSwitch = useRef(0);
+  const lastTitle = useRef('');
+  const generation = useRef(0);
+  const autoplayBlocked = useRef(false);
+  const finishFade = useRef<(() => void) | null>(null);
   const [stations, setStations] = useState<RadioStation[]>([]);
-  const [stationIndex, setStationIndex] = useState(0);
   const [current, setCurrent] = useState<RadioStation | null>(null);
   const [streamTitle, setStreamTitle] = useState<string | null>(null);
   const [state, setState] = useState<PlayerState>("searching");
@@ -75,8 +82,13 @@ export function RadioPanel({
   }, []);
 
   const switchTo = useCallback(async (station: RadioStation, reason: string, first = false) => {
+    if (switching.current) return false;
     const decks = getDecks();
     if (!decks) return false;
+    switching.current = true;
+    const operation = generation.current;
+    autoplayBlocked.current = false;
+    visited.current.add(station.id);
     if (animationFrame.current) cancelAnimationFrame(animationFrame.current);
     const { active, standby, next } = decks;
     setState(first ? "ready" : "transitioning");
@@ -85,8 +97,20 @@ export function RadioPanel({
     standby.volume = 0;
     try {
       await waitUntilReady(standby);
+      if (operation !== generation.current) return false;
       await standby.play();
+      if (operation !== generation.current) return false;
     } catch (error) {
+      if (operation !== generation.current) return false;
+      autoplayBlocked.current = error instanceof DOMException && error.name === 'NotAllowedError';
+      switching.current = false;
+      standby.pause();
+      if (!active.paused && active.src) {
+        setState('playing');
+        setMessage('Новая станция недоступна — сохраняем текущий эфир');
+        addHistory({type: 'system', stationName: station.name, stationId: station.id, country: station.country, detail: 'Ошибка подключения; переход не состоялся'});
+        return false;
+      }
       setState(error instanceof DOMException && error.name === "NotAllowedError" ? "paused" : "error");
       setMessage(error instanceof DOMException && error.name === "NotAllowedError" ? "Нажмите play — браузер ждёт вашего действия" : "Этот поток не ответил. Попробуйте другой.");
       setCurrent(station);
@@ -97,7 +121,7 @@ export function RadioPanel({
 
     setCurrent(station);
     setStreamTitle(null);
-    addHistory({ type: first ? "station" : "transition", stationName: station.name, detail: reason });
+    lastTitle.current = '';
 
     if (first || active.paused || !active.src) {
       active.pause();
@@ -106,11 +130,15 @@ export function RadioPanel({
       activeDeck.current = next;
       setState("playing");
       setMessage("Прямой эфир");
+      switching.current = false;
+      lastSwitch.current = Date.now();
+      addHistory({type: 'station', stationName: station.name, stationId: station.id, country: station.country, streamUrl: station.url, detail: reason});
       return true;
     }
 
     const startedAt = performance.now();
     await new Promise<void>((resolve) => {
+      finishFade.current = resolve;
       function tick(now: number) {
         const progress = Math.min(1, (now - startedAt) / CROSSFADE_MS);
         const theta = progress * Math.PI * 0.5;
@@ -121,12 +149,17 @@ export function RadioPanel({
       }
       animationFrame.current = requestAnimationFrame(tick);
     });
+    finishFade.current = null;
+    if (operation !== generation.current) return false;
     active.pause();
     active.removeAttribute("src");
     active.load();
     activeDeck.current = next;
     setState("playing");
     setMessage("Новая станция в эфире");
+    switching.current = false;
+    lastSwitch.current = Date.now();
+    addHistory({type: 'transition', stationName: station.name, stationId: station.id, country: station.country, streamUrl: station.url, detail: reason});
     return true;
   }, [addHistory, getDecks]);
 
@@ -139,12 +172,28 @@ export function RadioPanel({
       setMessage(`Ищем: ${atmosphere.tags.join(" · ")}`);
       try {
         const response = await fetch(`/api/radio?tags=${encodeURIComponent(atmosphere.tags.join(","))}`);
-        const data = (await response.json()) as { stations?: RadioStation[]; error?: string };
+        const data = (await response.json()) as { stations?: RadioStation[]; error?: string; hasMore?: boolean; nextOffset?: number };
         if (!response.ok || !data.stations?.length) throw new Error(data.error || "Подходящих станций не найдено");
         if (cancelled) return;
         setStations(data.stations);
-        setStationIndex(0);
-        await switchTo(data.stations[0], `Подобрано для профиля «${atmosphere.label}»`, true);
+        visited.current.clear();
+        for (const station of data.stations.slice(0, 5)) {
+          if (cancelled) return;
+          const started = await switchTo(station, `Подобрано для профиля «${atmosphere.label}»`, true);
+          if (started || autoplayBlocked.current) break;
+        }
+        let more = data.hasMore;
+        let offset = data.nextOffset;
+        while (!cancelled && more && offset !== undefined) {
+          const nextResponse = await fetch(`/api/radio?tags=${encodeURIComponent(atmosphere.tags.join(','))}&offset=${offset}`);
+          if (!nextResponse.ok || cancelled) break;
+          const page = await nextResponse.json();
+          if (cancelled) break;
+          setStations(items => diversify([...items, ...page.stations]));
+          more = page.hasMore;
+          if (page.nextOffset <= offset) break;
+          offset = page.nextOffset;
+        }
       } catch (error) {
         if (cancelled) return;
         setState("error");
@@ -154,7 +203,10 @@ export function RadioPanel({
     void discover();
     return () => {
       cancelled = true;
+      generation.current += 1;
+      switching.current = false;
       if (animationFrame.current) cancelAnimationFrame(animationFrame.current);
+      finishFade.current?.();
       [audioA, audioB].forEach((audio) => {
         audio?.pause();
         audio?.removeAttribute("src");
@@ -163,13 +215,19 @@ export function RadioPanel({
   }, [atmosphere.key, atmosphere.label, atmosphere.tags, switchTo]);
 
   useEffect(() => {
-    if (!current) return;
+    if (!current || current.id.startsWith('custom:')) return;
     let cancelled = false;
     async function readMetadata() {
       try {
         const response = await fetch(`/api/radio/metadata?stationId=${encodeURIComponent(current!.id)}`);
         const data = (await response.json()) as { streamTitle?: string | null };
-        if (!cancelled && data.streamTitle) setStreamTitle(data.streamTitle);
+        if (!cancelled && data.streamTitle) {
+          setStreamTitle(data.streamTitle);
+          if (data.streamTitle !== lastTitle.current) {
+            lastTitle.current = data.streamTitle;
+            addHistory({type: 'track', stationName: current!.name, stationId: current!.id, country: current!.country, streamTitle: data.streamTitle, detail: 'Название из метаданных эфира'});
+          }
+        }
       } catch {
         // Many stations do not expose ICY metadata; station-level matching remains valid.
       }
@@ -177,9 +235,21 @@ export function RadioPanel({
     void readMetadata();
     const timer = window.setInterval(readMetadata, 45_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [current]);
+  }, [current, addHistory]);
+
+  useEffect(() => {
+    if (state !== 'playing' || !current) return;
+    const timer = window.setInterval(() => {
+      if (switching.current || Date.now() - lastSwitch.current < 240_000) return;
+      let next = nextStation(stations, current, visited.current);
+      if (!next) { visited.current.clear(); next = nextStation(stations, current, visited.current); }
+      if (next) void switchTo(next, 'Автоматическая ротация: подходящий жанр, приоритет другой страны');
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [state, current, stations, switchTo]);
 
   function togglePlayback() {
+    if (switching.current) return;
     const decks = getDecks();
     if (!decks || !current) return;
     const audio = decks.active.src ? decks.active : decks.standby;
@@ -196,9 +266,9 @@ export function RadioPanel({
   async function rejectCurrent() {
     if (!stations.length || !current) return;
     addHistory({ type: "rejected", stationName: current.name, streamTitle: streamTitle ?? undefined, detail: "Отмечено: не подходит" });
-    const nextIndex = (stationIndex + 1) % stations.length;
-    setStationIndex(nextIndex);
-    await switchTo(stations[nextIndex], "Выбрана другая атмосфера по вашему сигналу");
+    let next = nextStation(stations, current, visited.current);
+    if (!next) { visited.current.clear(); next = nextStation(stations, current, visited.current); }
+    if (next) await switchTo(next, "Другая станция по вашему сигналу");
   }
 
   function changeVolume(next: number) {
@@ -212,7 +282,7 @@ export function RadioPanel({
   const atmosphereStyle = { "--mood-a": atmosphere.colors[0], "--mood-b": atmosphere.colors[1] } as React.CSSProperties;
 
   return (
-    <aside className={`music-panel ${collapsed ? "is-collapsed" : ""}`} style={atmosphereStyle}>
+    <aside className={`music-panel ${collapsed ? "is-collapsed" : ""}`} style={atmosphereStyle} data-state={state} data-station-id={current?.id}>
       <audio ref={deckA} preload="none" />
       <audio ref={deckB} preload="none" />
       <div className="music-panel-head">
@@ -238,9 +308,14 @@ export function RadioPanel({
             <strong>{atmosphere.label}</strong>
             <p>{atmosphere.note}</p>
             <div className="tag-row">{atmosphere.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+            <p>{stations.length} станций · {new Set(stations.map(s => s.country).filter(Boolean)).size} стран</p>
           </div>
 
           <div className="history-list" aria-live="polite">
+            <button className="diagnostics-export" onClick={() => {
+              const url = URL.createObjectURL(new Blob([JSON.stringify({exportedAt: new Date().toISOString(), history, currentStation: current, candidates: stations.length}, null, 2)], {type: 'application/json'}));
+              const link = document.createElement('a'); link.href = url; link.download = 'radio-session.json'; link.click(); URL.revokeObjectURL(url);
+            }}>Скачать историю эфира</button>
             {history.length === 0 ? (
               <div className="history-empty"><AudioLines size={22} /><p>История появится после подключения к эфиру.</p></div>
             ) : history.map((entry) => (
@@ -249,6 +324,7 @@ export function RadioPanel({
                 <div>
                   <time>{new Date(entry.timestamp).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" })}</time>
                   <strong>{entry.stationName}</strong>
+                  {entry.country && <span>{entry.country}</span>}
                   {entry.streamTitle && <span>{entry.streamTitle}</span>}
                   <p>{entry.detail}</p>
                 </div>
@@ -262,6 +338,7 @@ export function RadioPanel({
               <div>
                 <span className="eyebrow">{state === "transitioning" ? "Crossfade / 8 sec" : "Live signal"}</span>
                 <strong>{current?.name || "Atmosphere Radio"}</strong>
+                {current?.country && <span>{current.country}</span>}
                 <span className="stream-title">{streamTitle || message}</span>
               </div>
               {current?.homepage && <a className="icon-button" href={current.homepage} target="_blank" rel="noreferrer" aria-label="Открыть сайт станции"><ExternalLink size={14} /></a>}
@@ -270,7 +347,7 @@ export function RadioPanel({
               <button className="icon-button strong" onClick={togglePlayback} disabled={!current || state === "searching"} aria-label={isPlaying ? "Пауза" : "Включить эфир"}>
                 {state === "searching" ? <RefreshCw className="spin" size={17} /> : isPlaying ? <Pause size={17} /> : <Play size={17} />}
               </button>
-              <button className="reject-button" onClick={() => void rejectCurrent()} disabled={!current || state === "searching"}><X size={14} />Не подходит</button>
+              <button className="reject-button" onClick={() => void rejectCurrent()} disabled={!current || state === "searching" || state === 'transitioning'}><X size={14} />Не подходит</button>
               <label className="volume-control">
                 {volume === 0 ? <VolumeX size={16} /> : volume < 0.5 ? <Volume1 size={16} /> : <Volume2 size={16} />}
                 <input type="range" min="0" max="1" step="0.05" value={volume} onChange={(event) => changeVolume(Number(event.target.value))} aria-label="Громкость" />

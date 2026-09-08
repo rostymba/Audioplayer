@@ -76,6 +76,7 @@ button:focus-visible, a:focus-visible, input:focus-visible {
   transition: grid-template-columns 280ms cubic-bezier(.2,.75,.2,1);
 }
 .reading-workspace.history-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
+.diagnostics-export { padding: 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); font: inherit; font-size: 10px; cursor: pointer; }
 
 .music-panel, .reader-surface { min-width: 0; position: relative; border: 1px solid rgba(36, 35, 34, .13); background: rgba(245, 241, 232, .82); }
 .music-panel { display: flex; flex-direction: column; overflow: hidden; clip-path: polygon(14px 0, 100% 0, 100% 100%, 0 100%, 0 14px); }

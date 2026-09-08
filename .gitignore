@@ -6,3 +6,5 @@ out/
 *.log
 .DS_Store
 data/
+test-results/
+playwright-report/

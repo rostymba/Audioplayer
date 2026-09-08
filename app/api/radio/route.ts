@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { diversify } from '@/lib/radio-selection';
 
 const RADIO_BROWSER_HOSTS = [
   "https://de1.api.radio-browser.info",
@@ -39,15 +40,21 @@ function normalizeStation(station: RadioBrowserStation) {
   };
 }
 
-async function queryHost(host: string, tags: string[]) {
+async function queryHost(host: string, tags: string[], params: URLSearchParams) {
   const results = await Promise.all(
-    tags.slice(0, 3).map(async (tag) => {
+    (tags.length ? tags.slice(0, 3) : ['']).map(async (tag) => {
       const url = new URL("/json/stations/search", host);
-      url.searchParams.set("tag", tag);
+      if (tag) url.searchParams.set("tag", tag);
+      for (const key of ['name', 'countrycode', 'language']) {
+        const value = params.get(key)?.slice(0, 100);
+        if (value) url.searchParams.set(key, value);
+      }
+      const offset = Number(params.get('offset') || 0);
+      url.searchParams.set('offset', String(Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0));
       url.searchParams.set("hidebroken", "true");
       url.searchParams.set("order", "clickcount");
       url.searchParams.set("reverse", "true");
-      url.searchParams.set("limit", "35");
+      url.searchParams.set("limit", "250");
       const response = await fetch(url, {
         headers: { "User-Agent": "Audioplayer/0.1 (personal reading demo)" },
         signal: AbortSignal.timeout(6500),
@@ -65,20 +72,20 @@ export async function GET(request: NextRequest) {
     .get("tags")
     ?.split(",")
     .map((tag) => tag.trim().toLowerCase())
-    .filter(Boolean) ?? ["ambient"];
+    .filter(Boolean) ?? (request.nextUrl.searchParams.get('world') === '1' ? [] : ["ambient"]);
 
   let rawStations: RadioBrowserStation[] = [];
   let lastError: unknown;
   for (const host of RADIO_BROWSER_HOSTS) {
     try {
-      rawStations = await queryHost(host, requestedTags);
+      rawStations = await queryHost(host, requestedTags, request.nextUrl.searchParams);
       if (rawStations.length) break;
     } catch (error) {
       lastError = error;
     }
   }
 
-  if (!rawStations.length) {
+  if (!rawStations.length && lastError) {
     return NextResponse.json(
       { stations: [], error: lastError instanceof Error ? lastError.message : "Каталог радио временно недоступен" },
       { status: 502 },
@@ -86,7 +93,7 @@ export async function GET(request: NextRequest) {
   }
 
   const seen = new Set<string>();
-  const stations = rawStations
+  const stations = diversify(rawStations
     .filter((station) => {
       if (!station.lastcheckok || !station.url_resolved || seen.has(station.stationuuid)) return false;
       const codec = station.codec.toUpperCase();
@@ -96,11 +103,10 @@ export async function GET(request: NextRequest) {
     })
     .map(normalizeStation)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 24)
     .map(({ score, ...station }) => {
       void score;
       return station;
-    });
+    }));
 
-  return NextResponse.json({ stations, tags: requestedTags });
+  return NextResponse.json({ stations, tags: requestedTags, hasMore: rawStations.length >= 250, nextOffset: Number(request.nextUrl.searchParams.get('offset') || 0) + 250, countries: new Set(stations.map(s => s.country).filter(Boolean)).size, source: 'Radio Browser' });
 }
