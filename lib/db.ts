@@ -2,7 +2,9 @@ import type { StoredBook } from "./types";
 
 const DB_NAME = "audioplayer-local";
 const STORE_NAME = "books";
-const DB_VERSION = 1;
+// Version 2 repairs profiles where an earlier database was created before the
+// books store existed. The upgrade is additive and keeps every stored book.
+const DB_VERSION = 2;
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {

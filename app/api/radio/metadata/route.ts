@@ -1,31 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const RADIO_BROWSER_HOSTS = [
-  "https://de1.api.radio-browser.info",
-  "https://nl1.api.radio-browser.info",
-];
-
-async function resolveStationStream(stationId: string) {
-  for (const host of RADIO_BROWSER_HOSTS) {
-    try {
-      const lookupUrl = new URL(`/json/stations/byuuid/${encodeURIComponent(stationId)}`, host);
-      const response = await fetch(lookupUrl, {
-        headers: { "User-Agent": "Audioplayer/0.1 (personal reading demo)" },
-        signal: AbortSignal.timeout(4000),
-        next: { revalidate: 1800 },
-      });
-      if (!response.ok) continue;
-      const stations = (await response.json()) as Array<{ url_resolved?: string }>;
-      const candidate = stations[0]?.url_resolved;
-      if (!candidate) continue;
-      const streamUrl = new URL(candidate);
-      if (streamUrl.protocol === "http:" || streamUrl.protocol === "https:") return streamUrl;
-    } catch {
-      // Try the next Radio Browser mirror.
-    }
-  }
-  return null;
-}
+import { directMetadata } from '@/lib/radio-providers';
+import { resolveStationStream } from '@/lib/radio-resolver';
 
 function parseMetadata(bytes: Uint8Array) {
   const value = new TextDecoder("utf-8").decode(bytes).replace(/\0+$/g, "");
@@ -35,6 +10,10 @@ function parseMetadata(bytes: Uint8Array) {
 
 export async function GET(request: NextRequest) {
   const stationId = request.nextUrl.searchParams.get("stationId")?.trim().toLowerCase();
+  if (stationId && /^(soma:[a-z0-9]{1,32}|rp:[0-3])$/.test(stationId)) {
+    try { return NextResponse.json({ streamTitle: await directMetadata(stationId) }); }
+    catch { return NextResponse.json({ streamTitle: null }); }
+  }
   if (!stationId || !/^[a-f0-9-]{8,64}$/.test(stationId)) {
     return NextResponse.json({ streamTitle: null }, { status: 400 });
   }

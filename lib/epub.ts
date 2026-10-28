@@ -38,24 +38,33 @@ export async function importEpub(file: File): Promise<StoredBook> {
     }
 
     const samples: string[] = [];
+    const fallback: string[] = [];
     const spineItems = (book.spine as unknown as { spineItems: SpineItem[] }).spineItems.slice(0, 12);
     for (const item of spineItems) {
       if (samples.join(" ").length > 80_000) break;
       try {
         await item.load(book.load.bind(book));
         const text = item.document?.body?.textContent?.replace(/\s+/g, " ").trim();
-        if (text) samples.push(text.slice(0, 12_000));
+        if (text) {
+          // Пропускаем служебные страницы (обложка, копирайт, оглавление): они похожи у разных
+          // книг и схлопывают подбор. Короткие и boilerplate-страницы идут в запасной набор.
+          const boilerplate = text.length < 400 || /copyright|all rights reserved|isbn|содержание|оглавление|table of contents/i.test(text.slice(0, 400));
+          (boilerplate ? fallback : samples).push(text.slice(0, 12_000));
+        }
       } finally {
         item.unload();
       }
     }
 
     const title = metadata.title?.trim() || file.name.replace(/\.epub$/i, "");
-    const author = metadata.creator?.trim() || "Автор не указан";
-    return {
+    const author = metadata.creator?.trim() || "Unknown author";
+    const contentSamples = samples.length ? samples : fallback;
+    const sampleText = contentSamples.join(" ");
+    const stored: StoredBook = {
       id,
       title,
       author,
+      language: metadata.language?.trim().toLowerCase() || (/\p{Script=Cyrillic}/u.test(sampleText) ? 'ru' : undefined),
       coverDataUrl,
       file,
       fileName: file.name,
@@ -63,8 +72,10 @@ export async function importEpub(file: File): Promise<StoredBook> {
       lastOpenedAt: Date.now(),
       progressPercent: 0,
       status: "ready",
-      atmosphere: analyzeAtmosphere(samples.join(" "), title),
+      atmosphere: analyzeAtmosphere(sampleText, title),
+      sample: sampleText.slice(0, 4000),
     };
+    return stored;
   } finally {
     book.destroy();
   }

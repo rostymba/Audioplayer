@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { diversify } from '@/lib/radio-selection';
+import { discoverSoma, discoverParadise } from '@/lib/radio-providers';
+import type { RadioStation } from '@/lib/types';
+import { appendDiag } from '@/lib/diag-log';
 
 const RADIO_BROWSER_HOSTS = [
   "https://de1.api.radio-browser.info",
@@ -26,7 +29,8 @@ type RadioBrowserStation = {
 function normalizeStation(station: RadioBrowserStation) {
   return {
     id: station.stationuuid,
-    name: station.name.trim() || "Без названия",
+    source: 'Radio Browser' as const,
+    name: station.name.trim() || "Untitled station",
     url: station.url_resolved,
     homepage: station.homepage,
     favicon: station.favicon,
@@ -41,8 +45,8 @@ function normalizeStation(station: RadioBrowserStation) {
 }
 
 async function queryHost(host: string, tags: string[], params: URLSearchParams) {
-  const results = await Promise.all(
-    (tags.length ? tags.slice(0, 3) : ['']).map(async (tag) => {
+  const results = await Promise.allSettled(
+    (tags.length ? tags.slice(0, 8) : ['']).map(async (tag) => {
       const url = new URL("/json/stations/search", host);
       if (tag) url.searchParams.set("tag", tag);
       for (const key of ['name', 'countrycode', 'language']) {
@@ -64,15 +68,25 @@ async function queryHost(host: string, tags: string[], params: URLSearchParams) 
       return (await response.json()) as RadioBrowserStation[];
     }),
   );
-  return results.flat();
+  if (results.every(result => result.status === 'rejected')) throw new Error('Radio Browser unavailable');
+  return results.flatMap(result => result.status === 'fulfilled' ? result.value : []);
 }
 
 export async function GET(request: NextRequest) {
+  appendDiag('catalog.request', { tags: request.nextUrl.searchParams.get('tags'), offset: request.nextUrl.searchParams.get('offset'),
+    instance: request.nextUrl.searchParams.get('_i'), run: request.nextUrl.searchParams.get('_r'),
+    ready: request.nextUrl.searchParams.get('_ready'), book: request.nextUrl.searchParams.get('_book') });
   const requestedTags = request.nextUrl.searchParams
     .get("tags")
     ?.split(",")
     .map((tag) => tag.trim().toLowerCase())
-    .filter(Boolean) ?? (request.nextUrl.searchParams.get('world') === '1' ? [] : ["ambient"]);
+    .filter(Boolean).slice(0, 8) ?? (request.nextUrl.searchParams.get('world') === '1' ? [] : ["ambient"]);
+
+  const offsetValue = Number(request.nextUrl.searchParams.get('offset') || 0);
+  const offset = Number.isFinite(offsetValue) ? Math.max(0, Math.floor(offsetValue)) : 0;
+  const direct = Promise.allSettled(offset === 0
+    ? [discoverSoma(requestedTags), discoverParadise(requestedTags)]
+    : [Promise.resolve([] as RadioStation[]), Promise.resolve([] as RadioStation[])]);
 
   let rawStations: RadioBrowserStation[] = [];
   let lastError: unknown;
@@ -85,15 +99,23 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  if (!rawStations.length && lastError) {
+  const directResults = await direct;
+  const directStations = directResults.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+  const providers = [
+    { source: 'Radio Browser', status: lastError && !rawStations.length ? 'unavailable' : 'ok', count: rawStations.length },
+    ...directResults.map((r, index) => ({ source: ['SomaFM', 'Radio Paradise'][index],
+      status: offset > 0 ? 'first-page-only' : r.status === 'fulfilled' ? 'ok' : 'unavailable',
+      count: r.status === 'fulfilled' ? r.value.length : 0 })),
+  ];
+  if (!rawStations.length && !directStations.length && lastError) {
     return NextResponse.json(
-      { stations: [], error: lastError instanceof Error ? lastError.message : "Каталог радио временно недоступен" },
+      { stations: [], providers, error: "Could not fetch matching stations from the available sources" },
       { status: 502 },
     );
   }
 
   const seen = new Set<string>();
-  const stations = diversify(rawStations
+  const browserStations = rawStations
     .filter((station) => {
       if (!station.lastcheckok || !station.url_resolved || seen.has(station.stationuuid)) return false;
       const codec = station.codec.toUpperCase();
@@ -106,7 +128,9 @@ export async function GET(request: NextRequest) {
     .map(({ score, ...station }) => {
       void score;
       return station;
-    }));
+    });
+  // Prefer a network's direct entry when Radio Browser also lists the same station.
+  const stations = diversify([...directStations, ...browserStations]);
 
-  return NextResponse.json({ stations, tags: requestedTags, hasMore: rawStations.length >= 250, nextOffset: Number(request.nextUrl.searchParams.get('offset') || 0) + 250, countries: new Set(stations.map(s => s.country).filter(Boolean)).size, source: 'Radio Browser' });
+  return NextResponse.json({ stations, providers, tags: requestedTags, hasMore: rawStations.length >= 250, nextOffset: offset + 250, countries: new Set(stations.map(s => s.country).filter(Boolean)).size, source: 'Radio Browser + SomaFM + Radio Paradise' });
 }

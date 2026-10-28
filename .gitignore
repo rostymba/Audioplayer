@@ -8,3 +8,7 @@ out/
 data/
 test-results/
 playwright-report/
+.cache/
+.diag/
+tsconfig.tsbuildinfo
+.vercel
